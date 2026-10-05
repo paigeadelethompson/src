@@ -1149,6 +1149,15 @@ device	tdvfb: wsemuldisplaydev, rasops16, rasops32, vcons, videomode
 attach	tdvfb at pci
 file	dev/pci/tdvfb.c		tdvfb
 
+# XGI Volari framebuffer console driver (HP T5325)
+device	xgiframe: wsemuldisplaydev, rasops15, vcons
+attach	xgiframe at pci
+file	dev/pci/xgiframe/xgiframe.c	xgiframe
+file	dev/pci/xgiframe/vb_init.c	xgiframe
+file	dev/pci/xgiframe/vb_setmode.c	xgiframe
+file	dev/pci/xgiframe/vb_util.c	xgiframe
+defflag	opt_xgiframe.h	XGIFRAME_DEBUG
+
 # Rendition Verite V2100/V2200
 defflag	opt_veritefb.h		VERITEFB_CONSOLE VERITEFB_DEBUG
 device	veritefb: wsemuldisplaydev, rasops8, vcons, firmload, glyphcache,

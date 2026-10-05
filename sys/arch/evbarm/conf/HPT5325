@@ -1,478 +1,184 @@
-#	$NetBSD: HPT5325,v 1.55 2025/03/19 21:03:40 jakllsch Exp $
+#	$NetBSD$
 #
-#  This configuration supports for HP T5325 Thin Client
+# HPT5325 -- HP T5325 thin client, Marvell 88F6281 (Kirkwood/"Orion")
 #
+# Hardware facts were read from the running device over SSH, plus the U-Boot
+# and Linux boot logs and a known-good NetBSD boot of this exact board.  The
+# survey notes and raw captures live outside this tree, in the project's
+# NOTES.md and notes/raw/.
+#
+# SoC      Marvell 88F6281 A1 LE (Kirkwood), /proc/cpuinfo=Feroceon-KW
+# Board    DB-88F6281A-BP LE (Linux reports "OpenRD-Base")
+# CPU      ARM926EJ-S rev 1, ARMv5TE, single core (NetBSD: "Sheeva 88SV131")
+# FPU      none -- soft-float evbarm-earmv5, not -hf
+# Clocks   CPU 1200 MHz, SysClock 400, TClock 200
+# RAM      512 MB = 2x256MB DDR2, CS0 0x00000000 / CS1 0x10000000, 16-bit bus
+# Flash    1MB SPI NOR @0xf4000000 (U-Boot 512K, SSD fw 256K, 3x64K env)
+# Disk     SATA port 0 = SM224 486MB (on-board); port 1 = ADATA SP310 60GB
+# Net      GbE port0, PHY at MDIO 8; port1 unused
+# Video    XGI Volari Z11, PCI 18ca:0027, class 0x030000, 16MB VRAM
+# Serial   2x16550A fitted (ttyS0 irq33, ttyS1 irq34); ttyS0 = system console
+# USB      1x EHCI port; an SMSC USB2514 hub is fitted on it
+#
+# ---------------------------------------------------------------------------
+# PROVEN BASELINE -- match this unless you have a reason not to
+# ---------------------------------------------------------------------------
+# NetBSD 6.1.4 booted to a login prompt on this exact board and this exact
+# U-Boot build (MIC 3.4.19-16).  Its log is the reference for every choice
+# below.  It had no video driver, which is precisely why it showed
+#
+#   vendor 0x18ca product 0x0027 (VGA display) at pci0 dev 1 function 0
+#       not configured
+#
+# and why xgiframe exists.  Everything else it reported we inherit unchanged:
+#
+#   cpu0 Sheeva 88SV131 rev 1 (ARM9E-S core)      -> options CPU_SHEEVA
+#   mvsoc0 Marvell 88F6281 Rev. A1 Kirkwood       -> options KIRKWOOD
+#   com0 offset 0x12000 irq 33 -> "com0: console"  -> automatic, see CONSOLE
+#   mvsata0 GenIIe, 1hc, 2port/hc -> wd0, wd1     -> mvsata, ata, wd
+#   mvgbe0 + ukphy0 at phy 8                      -> mvgbe, mii, ukphy
+#   ehci0 irq 19 -> usb0, uhub0, uhub1            -> ehci, usb, uhub
+#   gttwsi0 irq 29 -> iic0                        -> gttwsi, iic
+#   mvpex0 irq 9 -> pci0                          -> mvpex, pci
+#
+# ---------------------------------------------------------------------------
+# LOAD ADDRESS -- do not override; the default is the proven one
+# ---------------------------------------------------------------------------
+# sys/arch/evbarm/conf/mk.marvell already defaults to
+#
+#     KERNEL_BASE_PHYS ?= 0x00008000
+#     KERNEL_BASE_VIRT ?= 0xc0008000
+#
+# and the 2014 kernel booted with exactly those: its uImage header read
+# "Load Address: 00008000 / Entry Point: 00008000".  So there is no need for
+# a makeoptions override here, and adding one only creates a way to drift away
+# from a configuration that is known to work.
+#
+# The U-Boot banner says "Addresses 8M - 0M are saved for the U-Boot usage",
+# which is why an earlier revision of this file pushed the kernel up to 8MB.
+# That is over-cautious: the banner is a reservation policy, not a map of what
+# U-Boot occupies.  What it actually places is
+#
+#     U-Boot code  0x00600000 - 0x0067FFF0,  BSS -> 0x006CD4E0
+#     malloc pool  0x00700000 - 0x00800000      ("(8M - 7M)")
+#
+# leaving 0x00000000 - 0x00600000 free apart from the Marvell boot monitor in
+# the first 32KB.  A ~4MB kernel at 0x00008000 ends around 0x00420000, well
+# clear of U-Boot.  (OPENRD, the upstream sibling config, does use 8MB; that
+# works too, but it is not what is proven on this board.)
+#
+# Because MKUBOOTIMAGEARGS in mk.marvell uses $(KERNEL_BASE_PHYS), the uImage
+# the build produces carries the right load/entry addresses automatically --
+# do NOT hand-wrap it with mkimage.
+#
+# ---------------------------------------------------------------------------
+# ROOT DEVICE -- not compiled in, comes from the U-Boot command line
+# ---------------------------------------------------------------------------
+# NetBSD reads "root=" from the bootargs Marvell's bootm passes in r3:
+#   sys/arch/evbarm/marvell/marvell_machdep.c -> parse_mi_bootargs
+#   -> set_root_device() in sys/arch/evbarm/evbarm/autoconf.c
+#
+# There is no BOOT_ARGS fallback on this path (that option only exists for the
+# fdt/gemini/kobo machines), so root must be passed at boot or NetBSD will
+# guess.  The 2014 boot passed nothing and landed on:
+#
+#     root on wd1a dumps on wd1b
+#
+# i.e. the 60GB ADATA SP310 on SATA *port 1*, not the 486MB SM224 on port 0.
+# Pass it explicitly:
+#
+#     bootm <addr> root=wd1a
+#
+# Marvell's own U-Boot convention is "rootdev=mgi0", which NetBSD ignores -- it
+# falls through silently and can pick the wrong disk.  "mgi0" is also
+# Marvell's Linux-side name; the NetBSD interface is mvgbe0.
+#
+# NOTE: U-Boot loads the kernel itself from the *other* partition of that same
+# disk ("fatload ide 1:1"), while NetBSD roots on partition "a" of it.  Confirm
+# the on-disk partition layout before the first boot -- if U-Boot is reading
+# p1 as FAT and NetBSD is asked for wd1a as ffs, one of the two is wrong.
+#
+# ---------------------------------------------------------------------------
+# CONSOLE -- keep BOTH; serial is how we debug this driver
+# ---------------------------------------------------------------------------
+# com0 is attached as the system console unconditionally: the local consinit()
+# in sys/arch/evbarm/marvell/marvell_machdep.c calls mvuart_cnattach() for
+# MVSOC_COM0_BASE before any autoconfiguration, at CONSPEED (115200 8N1).  No
+# config line is needed to get it, and the 2014 log shows "com0: console".
+#
+# xgiframe then calls wsdisplay_cnattach(), which takes cn_tab over for video
+# and stashes the previous console in wsdisplay_ocn.  WSDISPLAY_MULTICONS is
+# what makes that useful: wsdisplay_cnputc() mirrors every character to
+# wsdisplay_ocn as well, and wsdisplay_getc() falls back to it for input.  So
+# with it enabled we get video *and* a serial transcript of the same session --
+# the only way to tell a failed mode set from a working one, and the only way
+# to reach the DDB prompt if video is not up yet.
+#
+# CONSPEED is stated explicitly below only to document the rate; the value
+# matches both the built-in B115200 default and U-Boot's own setting.
+#
+# ---------------------------------------------------------------------------
+# VIDEO
+# ---------------------------------------------------------------------------
+# XGI Volari Z11, PCI 18ca:0027, class 0x030000.  Device ID is known to NetBSD
+# as PCI_PRODUCT_XGI_VOLARI_Z11 (sys/dev/pci/pcidevs.h).
+#
+# BAR2 (0x1000-0x107f) is PCI I/O space holding the legacy VGA register window,
+# relocated to BAR2+0x30 -- Marvell's own driver prints "XGIfb: Relocate IO
+# address: 1000 [00001030]", which matches.  BAR0 (0xe8000000, 16MB) is the
+# linear framebuffer; BAR1 (0xec000000, 256KB) is MMIO that xgifb only ever
+# reports and never accesses, so xgiframe does not map it.
+#
+# Registers are programmed through the legacy index/data pairs; there is no
+# VGA-compatible BIOS POST on ARM (VGA_POST is x86-only), which is why the
+# generic vga driver cannot do this and xgiframe exists.
+#
+# Default mode 0x4a is 1024x768x16 (Marvell's driver reports "Default mode is
+# 1024x768x16 (60Hz)"), hence 16bpp RGB565 and a 2048-byte stride.
+#
+# Do NOT list vga* here as well: vga_pci_match() would also bind on PCI class
+# code, and both drivers would attach to the same device and fight over it.
+#
+# Device lines come last on purpose: config(5) preserves declaration order into
+# ioconf.c, and "attach ... at pci?" is only resolved because SHEEVAPLUG has
+# already declared pci* above us.
+#
+# ---------------------------------------------------------------------------
+# mvsdio (Marvell SD/MMC) does not work on OPENRD-family boards -- the 2014 log
+# shows "mvsdio at mvsoc0 unit 0 not configured" -- but "no mvsdio" is NOT
+# valid config syntax: "no" accepts options / makeoptions / file-system, not a
+# device name, and nbconfig fails with a syntax error.  Excluding a driver
+# SHEEVAPLUG already pulled in needs an edit to the parent config, which an
+# include cannot do.  Left enabled; it never attaches.
+# ---------------------------------------------------------------------------
 
-include 	"arch/evbarm/conf/std.marvell"
+include		"arch/evbarm/conf/SHEEVAPLUG"
 
-options 	INCLUDE_CONFIG_FILE	# embed config file in kernel binary
-
-# estimated number of users
-
-maxusers	32
-
-# Board Type
+# Board id.  Purely cosmetic here -- the only functional use on Marvell is the
+# uImage name (-n "NetBSD/$(BOARDTYPE) ..."), and the gtpci interrupt-pin hint
+# table is #if defined(ORION), which Kirkwood does not set.  Match the 2014
+# kernel, whose image was named "NetBSD/hpt5325 6.1.4".
+#
+# SHEEVAPLUG sets both of these already, so clear them first or nbconfig warns
+# "already have makeoptions `BOARDTYPE=sheevaplug'".
+no makeoptions	BOARDTYPE
 makeoptions	BOARDTYPE="hpt5325"
-options 	EVBARM_BOARDTYPE=hpt5325
+no options	EVBARM_BOARDTYPE
+options		EVBARM_BOARDTYPE=hpt5325
 
-# CPU options
-options 	CPU_SHEEVA
-#options 	SHEEVA_L2_CACHE
-#options 	SHEEVA_L2_CACHE_WT
-#makeoptions	CPUFLAGS="-march=armv5te"
-makeoptions	CPUFLAGS="-mtune=arm9e"
+# No load-address overrides on purpose -- see LOAD ADDRESS above; the stock
+# mk.marvell defaults (0x00008000 / 0xc0008000) are the proven ones.
 
-# Marvell SoC options
-options 	KIRKWOOD
+# Verbose init: with serial we have a real console, so early output is cheap
+# and worth having while bringing up new hardware.
+options		MVSOC_CONSOLE_EARLY
+options		VERBOSE_INIT_ARM
 
-# Standard system options
+options		WSDISPLAY_MULTICONS
+options		CONSPEED=115200
 
-options 	RTC_OFFSET=0	# hardware clock is this many mins. west of GMT
-#options 	NTP		# NTP phase/frequency locked loop
+# No FPU on this SoC; the soft-float build is correct.
+#options		FPU_VFP
 
-# File systems
-
-file-system 	FFS		# UFS
-file-system 	EXT2FS		# second extended file system (linux)
-#file-system 	LFS		# log-structured file system
-file-system 	MFS		# memory file system
-file-system 	NFS		# Network File System client
-#file-system 	NTFS		# Windows/NT file system (experimental)
-file-system 	CD9660		# ISO 9660 + Rock Ridge file system
-file-system 	MSDOSFS		# MS-DOS file system
-file-system 	FDESC		# /dev/fd
-file-system 	KERNFS		# /kern
-file-system 	NULLFS		# loopback file system
-#file-system 	OVERLAY		# overlay file system
-file-system 	PROCFS		# /proc
-#file-system	PUFFS		# Userspace file systems (e.g. ntfs-3g & sshfs)
-#file-system 	UMAPFS		# NULLFS + uid and gid remapping
-#file-system 	UNION		# union file system
-#file-system 	CODA		# Coda File System; also needs vcoda (below)
-file-system 	PTYFS		# /dev/ptm support
-file-system 	TMPFS		# Efficient memory file-system
-file-system 	UDF		# experimental - OSTA UDF CD/DVD file-system
-#file-system 	HFS		# experimental - Apple HFS+ (read-only)
-
-# File system options
-#options 	FFS_EI		# FFS Endian Independent support
-options 	FFS_NO_SNAPSHOT	# No FFS snapshot support
-#options 	QUOTA		# legacy UFS quotas
-#options 	QUOTA2		# new, in-filesystem UFS quotas
-options 	UFS_DIRHASH	# UFS Large Directory Hashing
-#options 	UFS_EXTATTR	# Extended attribute support for UFS1
-options 	WAPBL		# File system journaling support
-#options 	DISKLABEL_EI	# disklabel Endian Independent support
-options 	NFSSERVER	# Network File System server
-
-# Networking options
-
-#options 	GATEWAY		# packet forwarding
-options 	INET		# IP + ICMP + TCP + UDP
-options 	INET6		# IPv6
-#options 	IPSEC		# IP security
-#options 	IPSEC_DEBUG	# debug for IP security
-#options 	MROUTING	# IP multicast routing
-#options 	PIM		# Protocol Independent Multicast
-#options 	NETATALK	# AppleTalk networking protocols
-#options 	PPP_BSDCOMP	# BSD-Compress compression support for PPP
-#options 	PPP_DEFLATE	# Deflate compression support for PPP
-#options 	PPP_FILTER	# Active filter support for PPP (requires bpf)
-#options 	TCP_DEBUG	# Record last TCP_NDEBUG packets with SO_DEBUG
-
-#options 	NFS_BOOT_BOOTP
-options 	NFS_BOOT_DHCP
-#options 	NFS_BOOT_BOOTPARAM
-
-# Compatibility options
-
-include 	"conf/compat_netbsd50.config"
-options 	COMPAT_NETBSD32	# allow running arm (e.g. non-earm) binaries
-
-# Shared memory options
-
-options 	SYSVMSG		# System V-like message queues
-options 	SYSVSEM		# System V-like semaphores
-options 	SYSVSHM		# System V-like memory sharing
-
-# Device options
-
-#options 	MEMORY_DISK_HOOKS	# boottime setup of ramdisk
-#options 	MEMORY_DISK_IS_ROOT	# use memory disk as root
-#options 	MEMORY_DISK_DYNAMIC
-#options 	MEMORY_DISK_ROOT_SIZE=22528	# Size in blocks
-#options 	MEMORY_RBFLAGS=RB_AUTOBOOT
-
-# Miscellaneous kernel options
-
-#options 	KTRACE		# system call tracing, a la ktrace(1)
-options 	IRQSTATS	# manage IRQ statistics
-#options 	MODULAR
-options 	MIIVERBOSE	# Verbose MII autoconfuration messages
-#options 	PCIVERBOSE	# Verbose PCI descriptions
-options 	USBVERBOSE	# verbose USB device autoconfig messages
-#options 	DDB_KEYCODE=0x40
-#options 	USERCONF	# userconf(4) support
-#options 	PIPE_SOCKETPAIR	# smaller, but slower pipe(2)
-#options 	SYSCTL_INCLUDE_DESCR	# Include sysctl descriptions in kernel
-
-# Alternate buffer queue strategies for better responsiveness under high
-# disk I/O load.
-#options 	BUFQ_READPRIO
-options 	BUFQ_PRIOCSCAN
-
-# Development and Debugging options
-
-options 	DIAGNOSTIC	# internal consistency checks
-#options 	DEBUG
-#options 	UVMHIST		# kernhist for uvm/pmap subsystems
-#options 	VERBOSE_INIT_ARM # verbose bootstraping messages
-options 	DDB		# in-kernel debugger
-#options 	DDB_HISTORY_SIZE=100	# Enable history editing in DDB
-#options 	KGDB
-#options 	DEBUG_KGDB
-makeoptions	DEBUG="-g"	# compile full symbol table
-#makeoptions	COPTS="-O2"
-makeoptions	COPY_SYMTAB=1
-#options 	AUDIO_DEBUG=2
-
-config		netbsd		root on ? type ?
-
-# The main bus device
-mainbus0 at root
-
-# The boot cpu
-cpu0	at mainbus?
-
-# Marvell MV88F6xxx Kirkwood System-on-chip
-mvsoc0	at mainbus?
-
-# On-chip PCI Express Interface
-mvpex*	at mvsoc? offset ? irq ?
-
-# PCI bus support
-options 	PCI_NETBSD_CONFIGURE
-#options 	PCI_CONFIG_DUMP		# verbosely dump PCI config space
-
-pci*	at mvpex?
-
-pchb*	at pci? dev ? function ?	# PCI-Host bridges
-
-#xgifb	at pci? function ?		# XGI Volari Z11 GPU (not yet)
-#wsdisplay0	at wsemuldisplaydev? console 1
-
-# On-chip Serial-ATA II Host Controller (SATAHC)
-mvsata* at mvsoc? offset ? irq ?
-
-# On-chip Gigabit Ethernet Controller Interface
-mvgbec* at mvsoc? offset ?
-mvgbe*	at mvgbec? port ? irq ?
-
-makphy* at mii? phy ?
-rgephy* at mii? phy ?
-rlphy* at mii? phy ?
-ukphy* at mii? phy ?
-
-# On-chip USB 2.0 Interface
-ehci*	at mvsoc? offset ? irq ?
-
-# On-chip Cryptographic Engines and Security Accelerator
-#mvcesa* at mvsoc? offset ? irq ?
-
-# On-chip Two-Wire Serial Interface (TWSI)
-gttwsi* at mvsoc? offset ? irq ?
-iic*	at gttwsi?
-
-# On-chip UART Interface
-com*	at mvsoc? offset ? irq ?
-
-# On-chip IDMA Controller
-#gtidmac* at mvsoc? offset ? irq ?
-
-# On-chip General Purpose I/O Port Interface
-#mvsocgpp* at mvsoc? offset ? irq ?
-#gpio*	at mvsocgpp?
-
-# On-chip Timers
-mvsoctmr* at mvsoc? offset ? irq ?
-
-# On-chip SD/MMC Interface
-#mvsdio* at mvsoc? offset ? irq ?
-#sdmmc*	at mvsdio?
-
-#ld*	at sdmmc?
-
-# ATA (IDE) bus support
-atabus* at ata?
-#options 	ATADEBUG
-
-# IDE drives
-wd*	at atabus? drive ? flags 0x0000
-
-# ATAPI bus support
-atapibus* at atapi?
-
-# ATAPI devices
-# flags have the same meaning as for IDE drives.
-cd*	at atapibus? drive ? flags 0x0000	# ATAPI CD-ROM drives
-sd*	at atapibus? drive ? flags 0x0000	# ATAPI disk drives
-
-# USB bus support
-usb*	at ehci?
-
-# USB Hubs
-uhub*	at usb?
-uhub*	at uhub? port ?
-
-# USB HID device
-uhidev* at uhub? port ? configuration ? interface ?
-
-# USB Mice
-ums*	at uhidev? reportid ?
-wsmouse* at ums? mux 0
-
-# USB eGalax touch-panel
-uep*	at uhub? port ?
-wsmouse* at uep? mux 0
-
-# USB Keyboards
-ukbd*	at uhidev? reportid ?
-wskbd*	at ukbd? console ? mux 1
-
-# USB TEMPer and TEMPerHUM
-uthum*	at uhidev? reportid ?
-
-# USB serial adapter
-ucycom* at uhidev? reportid ?
-
-# USB Generic HID devices
-uhid*	at uhidev? reportid ?
-
-# USB LCDs and USB-VGA adaptors
-udl*	at uhub? port ?		# DisplayLink DL-1x0/1x5
-wsdisplay* at udl?
-
-options 	WSEMUL_VT100			# VT100 / VT220 emulation
-options 	WSDISPLAY_COMPAT_USL		# wsconscfg VT handling
-
-# USB Printer
-ulpt*	at uhub? port ? configuration ? interface ?
-
-# USB Modem
-umodem* at uhub? port ? configuration ?
-ucom*	at umodem?
-
-# Option N.V. Wireless WAN modems
-uhso*	at uhub? port ? configuration ?
-
-# USB Mass Storage
-umass*	at uhub? port ? configuration ? interface ?
-scsibus* at scsi?
-sd*	at scsibus? target ? lun ?	# SCSI disk drives
-cd*	at scsibus? target ? lun ?	# SCSI CD-ROM drives
-
-# USB audio
-uaudio* at uhub? port ? configuration ?
-
-# USB MIDI
-umidi* at uhub? port ? configuration ?
-midi*		at midibus?
-
-# USB IrDA
-# USB-IrDA bridge spec
-uirda* at uhub? port ? configuration ? interface ?
-irframe* at uirda?
-
-stuirda* at uhub? port ? configuration ? interface ?
-irframe* at stuirda?
-
-# SigmaTel STIr4200 USB/IrDA Bridge
-ustir* at uhub? port ?
-irframe* at ustir?
-
-# USB Ethernet adapters
-aue*	at uhub? port ?		# ADMtek AN986 Pegasus based adapters
-axe*	at uhub? port ?		# ASIX AX88172 based adapters
-cdce*	at uhub? port ?		# CDC, Ethernet Networking Control Model
-cue*	at uhub? port ?		# CATC USB-EL1201A based adapters
-kue*	at uhub? port ?		# Kawasaki LSI KL5KUSB101B based adapters
-mue*	at uhub? port ?		# Microchip LAN75xx/LAN78xx based adapters
-udav*	at uhub? port ?		# Davicom DM9601 based adapters
-ure*	at uhub? port ?		# Realtek RTL8152/RTL8153 based adapters
-url*	at uhub? port ?		# Realtek RTL8150L based adapters
-
-# USB 802.11 adapters
-atu*	at uhub? port ?		# Atmel AT76C50XX based adapters
-ural*	at uhub? port ?		# Ralink Technology RT2500USB 802.11a/b/g
-rum*	at uhub? port ?		# Ralink Technology RT2501/RT2601 802.11a/b/g
-zyd*	at uhub? port ?		# Zydas ZD1211
-
-# Prolific PL2301/PL2302 host-to-host adapter
-upl*	at uhub? port ?
-
-# Serial adapters
-ubsa*	at uhub? port ?		# Belkin serial adapter
-ucom*	at ubsa? portno ?
-
-uchcom* at uhub? port ? 	# WinChipHead CH341/CH340 serial adapter
-ucom*	at uchcom? portno ?
-
-uftdi*	at uhub? port ?		# FTDI FT8U100AX serial adapter
-ucom*	at uftdi? portno ?
-
-uipaq*	at uhub? port ?		# iPAQ PDAs
-ucom*	at uipaq? portno ?
-
-umct*	at uhub? port ?		# MCT USB-RS232 serial adapter
-ucom*	at umct? portno ?
-
-uplcom* at uhub? port ? 	# I/O DATA USB-RSAQ2 serial adapter
-ucom*	at uplcom? portno ?
-
-uslsa*	at uhub? port ?		# Silicon Labs USB-RS232 serial adapter
-ucom*	at uslsa? portno ?
-
-uvscom* at uhub? port ? 	# SUNTAC Slipper U VS-10U serial adapter
-ucom*	at uvscom? portno ?
-
-# RIM BlackBerry
-#uberry* at uhub? port ?
-
-# USB Handspring Visor
-uvisor* at uhub? port ?
-ucom*	at uvisor?
-
-# Kyocera AIR-EDGE PHONE
-#ukyopon* at uhub? port ?
-#ucom*	at ukyopon? portno ?
-
-# USB scanners that use SCSI emulation, e.g., HP5300
-usscanner* at uhub? port ?
-
-# Topfield TF5000PVR range of DVB recorders
-#utoppy* at uhub? port ?
-
-# D-Link DSB-R100 USB radio
-#udsbr*	at uhub? port ?
-#radio*	at udsbr?
-
-# USB Generic driver
-ugen*	at uhub? port ?
-
-# USB 3G datacards
-#umodeswitch* at uhub? port ?
-#u3g*	at uhub? port ?
-#ucom*	at u3g?
-
-# USB generic serial port (e.g., data over cellular)
-ugensa* at uhub? port ?
-ucom*	at ugensa?
-
-# Bluetooth Controller and Device support
-
-# Bluetooth SDIO Controller
-#sbt* at sdmmc?
-
-# Bluetooth USB Controllers
-ubt* at uhub? port ?
-aubtfwl* at uhub? port ?
-
-# Bluetooth Device Hub
-bthub* at ubt?
-
-# Bluetooth HID support
-bthidev* at bthub?
-
-# Bluetooth Mouse
-btms* at bthidev? reportid ?
-wsmouse* at btms? mux 0
-
-# Bluetooth Keyboard
-btkbd* at bthidev? reportid ?
-wskbd* at btkbd? console ? mux 1
-
-# Bluetooth Apple Magic Mouse
-btmagic* at bthub?
-wsmouse* at btmagic? mux 0
-
-# Bluetooth Audio support
-btsco* at bthub?
-
-
-# On-chip RTC
-mvsocrtc* at mvsoc? offset ? irq ?
-
-# Audio support
-audio*	at audiobus?
-
-spkr*	at audio?			# PC speaker (synthesized)
-
-# Pseudo-Devices
-
-pseudo-device	crypto			# /dev/crypto device
-pseudo-device	swcrypto		# software crypto implementation
-
-# disk/mass storage pseudo-devices
-#pseudo-device	bio			# RAID control device driver
-#pseudo-device	ccd			# concatenated/striped disk devices
-#pseudo-device	cgd			# cryptographic disk devices
-#pseudo-device	raid			# RAIDframe disk driver
-#options 	RAID_AUTOCONFIG		# auto-configuration of RAID components
-# Options to enable various other RAIDframe RAID types.
-#options 	RF_INCLUDE_EVENODD=1
-#options 	RF_INCLUDE_RAID5_RS=1
-#options 	RF_INCLUDE_PARITYLOGGING=1
-#options 	RF_INCLUDE_CHAINDECLUSTER=1
-#options 	RF_INCLUDE_INTERDECLUSTER=1
-#options 	RF_INCLUDE_PARITY_DECLUSTERING=1
-#options 	RF_INCLUDE_PARITY_DECLUSTERING_DS=1
-#pseudo-device	fss			# file system snapshot device
-#pseudo-device	putter			# for puffs and pud
-
-pseudo-device	md			# memory disk device (ramdisk)
-pseudo-device	vnd			# disk-like interface to files
-options 	VND_COMPRESSION		# compressed vnd(4)
-
-# network pseudo-devices
-pseudo-device	bpfilter		# Berkeley packet filter
-#pseudo-device	carp			# Common Address Redundancy Protocol
-#pseudo-device	npf			# NPF packet filter
-pseudo-device	loop			# network loopback
-#pseudo-device	ppp			# Point-to-Point Protocol
-#pseudo-device	pppoe			# PPP over Ethernet (RFC 2516)
-#pseudo-device	sl			# Serial Line IP
-#pseudo-device	irframetty		# IrDA frame line discipline
-pseudo-device	tap			# virtual Ethernet
-#pseudo-device	tun			# network tunneling over tty
-#pseudo-device	gre			# generic L3 over IP tunnel
-#pseudo-device	gif			# IPv[46] over IPv[46] tunnel (RFC 1933)
-#pseudo-device	faith			# IPv[46] TCP relay translation i/f
-pseudo-device	stf			# 6to4 IPv6 over IPv4 encapsulation
-#pseudo-device	vlan			# IEEE 802.1q encapsulation
-#pseudo-device	bridge			# simple inter-network bridging
-#pseudo-device	vether			# Virtual Ethernet for bridge
-#pseudo-device	agr			# IEEE 802.3ad link aggregation
-
-# miscellaneous pseudo-devices
-pseudo-device	pty			# pseudo-terminals
-#pseudo-device	sequencer		# MIDI sequencer
-#options 	RND_COM
-pseudo-device	clockctl		# user control of clock subsystem
-pseudo-device	ksyms			# /dev/ksyms
-
-# a pseudo device needed for Coda	# also needs CODA (above)
-#pseudo-device	vcoda			# coda minicache <-> venus comm.
-
-# wscons pseudo-devices
-pseudo-device	wsmux			# mouse & keyboard multiplexor
-pseudo-device	wsfont
-
-# data mover pseudo-devices
-#pseudo-device	swdmover		# software dmover(9) back-end
-#pseudo-device	dmoverio		# /dev/dmover dmover(9) interface
-
-# Veriexec
-# include "dev/veriexec.config"
-
-#options 	PAX_MPROTECT=0		# PaX mprotect(2) restrictions
-#options 	PAX_ASLR=0		# PaX Address Space Layout Randomization
+xgiframe*	at pci? dev ? function ?
+wsdisplay*	at xgiframe? console ?
