@@ -1,11 +1,10 @@
-/*	$NetBSD: spl_stubs.c,v 1.4 2026/10/06 08:18:37 skrll Exp $	*/
-
+/*	$NetBSD: getexecpath.c,v 1.2 2026/10/07 20:15:03 christos Exp $	*/
 /*-
- * Copyright (c) 2010 The NetBSD Foundation, Inc.
+ * Copyright (c) 2026 The NetBSD Foundation, Inc.
  * All rights reserved.
  *
  * This code is derived from software contributed to The NetBSD Foundation
- * by Matt Thomas <matt@3am-software.com>.
+ * by Christos Zoulas.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,109 +28,42 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <sys/cdefs.h>
-__KERNEL_RCSID(0, "$NetBSD: spl_stubs.c,v 1.4 2026/10/06 08:18:37 skrll Exp $");
+#include <dlfcn.h>
+#include <string.h>
+#include <errno.h>
+#include <elf.h>
 
-#define __INTR_PRIVATE
-
-#include <sys/param.h>
-
-#include <mips/cache.h>
-#include <mips/intr.h>
-#include <mips/locore.h>
+#include "getexecpath.h"
 
 int
-splhigh(void)
+getexecpath(char *buf, size_t len)
 {
-	return (*mips_splsw.splsw_splhigh)();
+	const AuxInfo *aux;
+
+	for (aux = _dlauxinfo(); aux->a_type != AT_NULL; ++aux)
+		if (aux->a_type == AT_SUN_EXECNAME) {
+			if (strlcpy(buf, (void *)(intptr_t)aux->a_v, len) < len)
+				return 0;
+			errno = ERANGE;
+			return -1;
+		}
+	errno = ENOENT;
+	return -1;
 }
+
+#ifdef TEST
+#include <stdio.h>
+#include <err.h>
+#include <stdlib.h>
+#include <limits.h>
 
 int
-splhigh_noprof(void)
+main(void)
 {
-	return (*mips_splsw.splsw_splhigh_noprof)();
+	char buf[PATH_MAX];
+	if (getexecpath(buf, sizeof(buf)) == -1)
+		err(EXIT_FAILURE, "Can't get path");
+	printf("%s\n", buf);
+	return 0;
 }
-
-int
-splsched(void)
-{
-	return (*mips_splsw.splsw_splsched)();
-}
-
-int
-splvm(void)
-{
-	return (*mips_splsw.splsw_splvm)();
-}
-
-int
-splsoftserial(void)
-{
-	return (*mips_splsw.splsw_splsoftserial)();
-}
-
-int
-splsoftnet(void)
-{
-	return (*mips_splsw.splsw_splsoftnet)();
-}
-
-int
-splsoftbio(void)
-{
-	return (*mips_splsw.splsw_splsoftbio)();
-}
-
-int
-splsoftclock(void)
-{
-	return (*mips_splsw.splsw_splsoftclock)();
-}
-
-void
-spl0(void)
-{
-	(*mips_splsw.splsw_spl0)();
-}
-
-void
-splx(int s)
-{
-	(*mips_splsw.splsw_splx)(s);
-}
-
-void
-splx_noprof(int s)
-{
-	(*mips_splsw.splsw_splx_noprof)(s);
-}
-
-int
-splraise(int s)
-{
-        return (*mips_splsw.splsw_splraise)(s);
-}
-
-int
-splintr(uint32_t *p)
-{
-	return (*mips_splsw.splsw_splintr)(p);
-}
-
-void
-_setsoftintr(uint32_t m)
-{
-	(*mips_splsw.splsw__setsoftintr)(m);
-}
-
-void
-_clrsoftintr(uint32_t m)
-{
-	(*mips_splsw.splsw__clrsoftintr)(m);
-}
-
-void
-splcheck(void)
-{
-	(*mips_splsw.splsw_splcheck)();
-}
+#endif
